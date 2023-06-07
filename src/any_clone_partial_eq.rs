@@ -9,6 +9,12 @@ pub(crate) trait AnyClonePartialEq {
             inner: Box::new(self),
         }
     }
+    fn dyning<'a>(&'a self) -> DynAnyClonePartialEq<'a>
+    where
+        Self: Sized + 'static,
+    {
+        DynAnyClonePartialEq { inner: self }
+    }
     fn clone_box(&self) -> Box<dyn AnyClonePartialEq>;
     fn equals(&self, other: &dyn AnyClonePartialEq) -> bool;
     fn as_any(&self) -> &dyn std::any::Any;
@@ -32,6 +38,20 @@ impl<T: 'static + std::any::Any + Clone + PartialEq + Debug> AnyClonePartialEq f
 
     fn debug(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         Debug::fmt(self, f)
+    }
+}
+
+pub(crate) struct DynAnyClonePartialEq<'a> {
+    inner: &'a dyn AnyClonePartialEq,
+}
+impl<'a> PartialEq for DynAnyClonePartialEq<'a> {
+    fn eq(&self, other: &Self) -> bool {
+        self.inner.equals(other.inner)
+    }
+}
+impl<'a> Debug for DynAnyClonePartialEq<'a> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.inner.debug(f)
     }
 }
 
@@ -68,5 +88,9 @@ impl AnyClonePartialEqBox {
         &self,
     ) -> Option<&T> {
         self.inner.as_any().downcast_ref::<T>()
+    }
+
+    pub fn as_ref(&self) -> &dyn AnyClonePartialEq {
+        self.inner.as_ref()
     }
 }
