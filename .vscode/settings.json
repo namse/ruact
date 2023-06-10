@@ -1,0 +1,11 @@
+{
+  "rust-analyzer.rustfmt.overrideCommand": [
+    "cargo",
+    "run",
+    "--manifest-path",
+    "fmt/Cargo.toml",
+    "--"
+  ],
+  "rust-analyzer.linkedProjects": ["./source/Cargo.toml"],
+  "rust-analyzer.showUnlinkedFileNotification": false
+}

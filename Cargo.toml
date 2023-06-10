@@ -1,7 +1,6 @@
-[package]
-name = "one-more-time"
-version = "0.1.0"
-edition = "2021"
+[workspace]
 
-[dependencies]
-crossbeam-channel = "0.5.8"
+members = [
+    "source",
+    "fmt",
+]

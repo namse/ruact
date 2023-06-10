@@ -144,6 +144,12 @@ fn render(props: impl ComponentProps) -> Rendered {
     Rendered {}
 }
 
+impl<T0: ComponentProps, T1: ComponentProps> ComponentProps for (T0, T1) {
+    fn component(self) -> Component {
+        todo!()
+    }
+}
+
 mod foo {
     use super::*;
     struct State {
@@ -176,7 +182,35 @@ mod foo {
                 (),
             );
 
-            render(Button {})
+            // <Button
+            //     field=5
+            // >
+            //     <Child>
+            //     </Child>
+            // </Button>
+
+            // Button
+            //     value: 5
+
+            //     Button
+            //         value: 5
+
+            // [Button { value: 5 }(
+            //     Button { value: 5 },
+            //     Button { value: 5 },
+            //     Button { value: 5 },
+            // )]
+
+            rsx!(Button {
+                    value: 5
+                }(
+                    Button { value: 5 },
+                    Button { value: 5 },
+                ),
+            )
+
+            // render<Button>
+            // render((Button {}, (Button {}, Button {})))
         }
     }
 
@@ -243,3 +277,4 @@ impl ComponentProps for Button {
         todo!()
     }
 }
+
