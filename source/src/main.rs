@@ -1,50 +1,199 @@
 mod any_clone_partial_eq;
+mod closure;
+mod foo;
 
 use any_clone_partial_eq::{AnyClonePartialEq, AnyClonePartialEqBox};
+use closure::Closure;
 use crossbeam_channel::{Receiver, Sender};
-use std::{any::Any, collections::HashMap};
+use std::{
+    any::Any,
+    cell::RefCell,
+    collections::HashMap,
+    fmt::Debug,
+    ops::Deref,
+    sync::{Arc, Mutex, OnceLock},
+};
+
+static SET_STATE_TX: OnceLock<Sender<SetStateInvoked>> = OnceLock::new();
 
 fn main() {
-    init_tx_rx();
-    let mut component_id_map = HashMap::new();
+    let (tx, rx) = crossbeam_channel::unbounded();
+    SET_STATE_TX.get_or_init(|| tx);
 
-    let root = foo::Props { b: 1 };
+    let root = foo::Foo { b: 1 }.component();
 
-    let component = root.component();
-    let id = component.dispatch.id;
-    component_id_map.insert(id, component);
+    let head = 0;
+    let mut stored_elements: Vec<Option<Element>> = vec![];
 
-    let component = component_id_map.get(&id).unwrap();
+    mount(root, head, &mut stored_elements);
 
-    let rendered = (component.render)(&component.state, &component.props, component.dispatch);
+    for (i, element) in stored_elements.iter().enumerate() {
+        let debug_text = match element {
+            Some(element) => match element {
+                Element::Native(_) => "Native",
+                Element::Component { props, render } => "Component",
+            },
+            None => "None",
+        };
+        println!("{}: {:?}", i, debug_text);
+    }
 
-    loop {
-        unsafe {
-            let event_message = RX.as_ref().unwrap().recv().unwrap();
-            println!("event id: {:?}", event_message.id);
+    match stored_elements.last().unwrap() {
+        Some(element) => match element {
+            Element::Native(native) => {
+                let button = native.as_any().downcast_ref::<Button>().unwrap();
+                button.on_click.invoke(())
+            }
+            Element::Component { props, render } => todo!(),
+        },
+        None => todo!(),
+    };
 
-            let component = component_id_map.get_mut(&event_message.id).unwrap();
-            let is_changed =
-                (component.on_event)(&mut component.state, &component.props, event_message.event);
+    while let Ok(set_state) = rx.recv() {
+        set_state.update_state();
+        re_render(set_state.component_id, &mut stored_elements);
 
-            if is_changed {
-                let rendered =
-                    (component.render)(&component.state, &component.props, component.dispatch);
+        match stored_elements.last().unwrap() {
+            Some(element) => match element {
+                Element::Native(native) => {
+                    let button = native.as_any().downcast_ref::<Button>().unwrap();
+                    button.on_click.invoke(())
+                }
+                Element::Component { props, render } => todo!(),
+            },
+            None => todo!(),
+        };
+    }
+}
+
+fn re_render(head: usize, stored_elements: &mut Vec<Option<Element>>) {
+    let stored = stored_elements.get(head).unwrap().as_ref().unwrap();
+    match stored {
+        Element::Native(_) => {}
+        Element::Component { props, render } => {
+            STORED_STATE_INDEX.with(|stored_state_index| {
+                stored_state_index.replace(0);
+            });
+            let next = (render)(props);
+            mount(next, head + 1, stored_elements)
+        }
+    }
+}
+
+fn mount(element: Element, head: usize, stored_elements: &mut Vec<Option<Element>>) {
+    let stored = {
+        while stored_elements.len() <= head {
+            stored_elements.push(None);
+        }
+        stored_elements.get_mut(head).unwrap()
+    };
+
+    let rerender_type = get_rerender_type(stored.as_ref(), &element);
+    match rerender_type {
+        RerenderType::Full => {
+            *stored = Some(element);
+        }
+        RerenderType::Props => {
+            let mut prev = stored.as_mut().unwrap();
+            match (&mut prev, element) {
+                (Element::Native(_), Element::Native(_)) => todo!(),
+                (Element::Native(_), Element::Component { props, render }) => todo!(),
+                (
+                    Element::Component {
+                        props: prev_props,
+                        render: prev_render,
+                    },
+                    Element::Native(_),
+                ) => todo!(),
+                (
+                    Element::Component {
+                        props: prev_props,
+                        render: _,
+                    },
+                    Element::Component {
+                        props: next_props,
+                        render: _,
+                    },
+                ) => {
+                    *prev_props = next_props;
+                }
+            }
+        }
+        RerenderType::None => {}
+    }
+
+    if rerender_type != RerenderType::None {
+        match stored.as_ref().unwrap() {
+            Element::Native(_) => {}
+            Element::Component { props, render } => {
+                STORED_STATE_INDEX.with(|stored_state_index| {
+                    stored_state_index.replace(0);
+                });
+                let next = (render)(props);
+                mount(next, head + 1, stored_elements)
             }
         }
     }
 }
 
-pub struct Component {
-    state: Box<dyn Any>,
-    props: Box<dyn Any>,
-    on_event: fn(&mut Box<dyn Any>, &Box<dyn Any>, Box<dyn Any>) -> bool,
-    render: fn(&Box<dyn Any>, &Box<dyn Any>, Dispatch) -> Rendered,
-    dispatch: Dispatch,
+#[derive(Debug, Clone, PartialEq)]
+enum RerenderType {
+    Full,
+    Props,
+    None,
 }
 
-trait ComponentProps {
-    fn component(self) -> Component;
+fn get_rerender_type(prev: Option<&Element>, next: &Element) -> RerenderType {
+    let Some(prev) = prev else {
+        return RerenderType::Full;
+    };
+
+    match (prev, next) {
+        (Element::Native(_), Element::Native(_)) => {
+            return RerenderType::Full;
+        }
+        (Element::Native(_), Element::Component { props, render }) => todo!(),
+        (
+            Element::Component {
+                props: prev_props,
+                render: prev_render,
+            },
+            Element::Native(_),
+        ) => todo!(),
+        (
+            Element::Component {
+                props: prev_props,
+                render: prev_render,
+            },
+            Element::Component {
+                props: next_props,
+                render: next_render,
+            },
+        ) => {
+            if prev_render as *const _ != next_render as *const _ {
+                return RerenderType::Full;
+            }
+
+            if prev_props.equals(next_props.as_ref()) {
+                return RerenderType::Props;
+            }
+        }
+    }
+
+    RerenderType::None
+}
+
+pub enum Element {
+    Native(Box<dyn AnyClonePartialEq>),
+    Component {
+        props: Box<dyn AnyClonePartialEq>,
+        render: fn(&Box<dyn AnyClonePartialEq>) -> Element,
+    },
+}
+
+trait Component {
+    fn render(&self) -> Element;
+    fn component(self) -> Element;
 }
 
 struct DirtyCheck<'a, Item> {
@@ -64,42 +213,6 @@ impl<Item> std::ops::DerefMut for DirtyCheck<'_, Item> {
     fn deref_mut(&mut self) -> &mut Self::Target {
         self.dirty = true;
         &mut self.item
-    }
-}
-
-struct EventMessage {
-    event: Box<dyn Any + Send + Sync>,
-    id: usize,
-}
-
-static mut TX: Option<Sender<EventMessage>> = None;
-static mut RX: Option<Receiver<EventMessage>> = None;
-
-fn init_tx_rx() {
-    unsafe {
-        if TX.is_none() {
-            let (tx, rx) = crossbeam_channel::unbounded();
-            TX = Some(tx);
-            RX = Some(rx);
-        }
-    }
-}
-
-#[derive(Clone, Copy)]
-struct Dispatch {
-    id: usize,
-}
-impl Dispatch {
-    fn call(&self, event: impl Any + Send + Sync) {
-        unsafe {
-            TX.as_ref()
-                .unwrap()
-                .send(EventMessage {
-                    event: Box::new(event),
-                    id: self.id,
-                })
-                .unwrap();
-        }
     }
 }
 
@@ -139,142 +252,95 @@ fn effect(name: &str, callback: impl FnOnce() + 'static, deps: impl AnyClonePart
     context.increase_effect_index();
 }
 
-struct Rendered {}
-fn render(props: impl ComponentProps) -> Rendered {
-    Rendered {}
+#[derive(Debug, Clone, PartialEq)]
+struct Button {
+    pub on_click: Closure<()>,
 }
 
-impl<T0: ComponentProps, T1: ComponentProps> ComponentProps for (T0, T1) {
-    fn component(self) -> Component {
-        todo!()
+impl Component for Button {
+    fn render(&self) -> Element {
+        unreachable!()
+    }
+    fn component(self) -> Element {
+        Element::Native(Box::new(self))
     }
 }
 
-mod foo {
-    use super::*;
-    struct State {
-        a: i32,
+#[derive(Clone, Copy, PartialEq, Debug)]
+struct SetState<T> {
+    _marker: std::marker::PhantomData<T>,
+    component_id: usize,
+    state_index: usize,
+}
+
+struct SetStateInvoked {
+    component_id: usize,
+    state_index: usize,
+    state: Arc<dyn AnyClonePartialEq>,
+}
+impl SetStateInvoked {
+    fn update_state(&self) {
+        STORED_STATES.with(move |state| {
+            let mut state = state.borrow_mut();
+            let state = state.get_mut(self.state_index).unwrap();
+            *state = self.state.clone();
+        });
     }
-    pub struct Props {
-        pub b: i32,
-    }
-    enum Event {
-        OnTick,
-    }
-    impl State {
-        fn mount(props: &Props) -> State {
-            State { a: props.b }
-        }
-        fn on_event(state: &mut DirtyCheck<State>, _props: &Props, event: Event) {
-            match event {
-                Event::OnTick => {
-                    state.a += 1;
-                }
-            }
-        }
-        fn render(state: &State, props: &Props, dispatch: Dispatch) -> Rendered {
-            println!("render foo. state.a: {}, props.b: {}", state.a, props.b);
-            effect(
-                "on mount",
-                move || {
-                    dispatch.call(Event::OnTick);
-                },
-                (),
-            );
+}
+unsafe impl Send for SetStateInvoked {}
+unsafe impl Sync for SetStateInvoked {}
 
-            // <Button
-            //     field=5
-            // >
-            //     <Child>
-            //     </Child>
-            // </Button>
+impl<T: 'static + Any + Clone + PartialEq + Debug> SetState<T> {
+    fn i(&self, new_state: T) {
+        println!(
+            "set state invoked, component_id: {}, state_index: {}",
+            self.component_id, self.state_index
+        );
 
-            // Button
-            //     value: 5
-
-            //     Button
-            //         value: 5
-
-            // [Button { value: 5 }(
-            //     Button { value: 5 },
-            //     Button { value: 5 },
-            //     Button { value: 5 },
-            // )]
-
-            rsx!(Button {
-                    value: 5
-                }(
-                    Button { value: 5 },
-                    Button { value: 5 },
-                ),
-            )
-
-            // render<Button>
-            // render((Button {}, (Button {}, Button {})))
-        }
+        SET_STATE_TX
+            .get()
+            .unwrap()
+            .send(SetStateInvoked {
+                component_id: self.component_id,
+                state_index: self.state_index,
+                state: Arc::new(new_state),
+            })
+            .unwrap();
     }
 
-    impl ComponentProps for Props {
-        fn component(self) -> Component {
-            static mut ID: usize = 0;
-            let dispatch = Dispatch {
-                id: unsafe {
-                    ID += 1;
-                    ID
-                },
-            };
-            Component {
-                state: Box::new(State::mount(&self)),
-                props: Box::new(self),
-                on_event: |state, props, event| {
-                    let state = state.downcast_mut::<State>().unwrap();
-                    let mut dirty_check_state = DirtyCheck {
-                        item: state,
-                        dirty: false,
-                    };
-                    State::on_event(
-                        &mut dirty_check_state,
-                        props.downcast_ref::<Props>().unwrap(),
-                        *event.downcast::<Event>().unwrap(),
-                    );
-
-                    println!("dirty_check_state.dirty: {}", dirty_check_state.dirty);
-
-                    dirty_check_state.dirty
-                },
-                render: |state, props, dispatch| {
-                    unsafe {
-                        match COMPONENT_CONTEXT.as_mut() {
-                            Some(context) => {
-                                println!("context.effect_index: {}", context.effect_index);
-                                context.effect_index = 0;
-                            }
-                            None => {
-                                COMPONENT_CONTEXT = Some(ComponentContext {
-                                    effect_index: 0,
-                                    effect_deps: vec![],
-                                });
-                            }
-                        }
-                    }
-
-                    State::render(
-                        state.downcast_ref::<State>().unwrap(),
-                        props.downcast_ref::<Props>().unwrap(),
-                        dispatch,
-                    )
-                },
-                dispatch,
-            }
+    fn new(component_id: usize, state_index: usize) -> Self {
+        Self {
+            _marker: std::marker::PhantomData,
+            component_id,
+            state_index,
         }
     }
 }
 
-struct Button {}
-
-impl ComponentProps for Button {
-    fn component(self) -> Component {
-        todo!()
-    }
+thread_local! {
+    static COMPONENT_ID: RefCell<usize> = RefCell::new(0);
+    static STORED_STATES: RefCell<Vec<Arc<dyn AnyClonePartialEq>>> = RefCell::new(vec![]);
+    static STORED_STATE_INDEX: RefCell<usize> = RefCell::new(0);
 }
 
+fn state<'a, T: 'static + Any + Clone + PartialEq + Debug>(initial: T) -> (&'a T, SetState<T>) {
+    let component_id: usize = COMPONENT_ID.with(|id| id.borrow().clone());
+    let state_index: usize = STORED_STATE_INDEX.with(|index| {
+        let mut index = index.borrow_mut();
+        let ret_index = *index;
+        *index += 1;
+        ret_index
+    });
+    let state = STORED_STATES.with(move |state| {
+        let mut state = state.borrow_mut();
+        if state.get(state_index).is_none() {
+            state.insert(state_index, Arc::new(initial));
+        }
+        state[state_index].clone()
+    });
+    let state_ptr = Arc::as_ptr(&state);
+    let set_state = SetState::new(component_id, state_index);
+
+    let state_ref = unsafe { &*state_ptr };
+    (state_ref.as_any().downcast_ref::<T>().unwrap(), set_state)
+}

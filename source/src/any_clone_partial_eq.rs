@@ -1,6 +1,6 @@
 use std::fmt::Debug;
 
-pub(crate) trait AnyClonePartialEq {
+pub trait AnyClonePartialEq {
     fn boxing(self) -> AnyClonePartialEqBox
     where
         Self: Sized + 'static,
@@ -41,7 +41,7 @@ impl<T: 'static + std::any::Any + Clone + PartialEq + Debug> AnyClonePartialEq f
     }
 }
 
-pub(crate) struct DynAnyClonePartialEq<'a> {
+pub struct DynAnyClonePartialEq<'a> {
     inner: &'a dyn AnyClonePartialEq,
 }
 impl<'a> PartialEq for DynAnyClonePartialEq<'a> {
@@ -55,7 +55,7 @@ impl<'a> Debug for DynAnyClonePartialEq<'a> {
     }
 }
 
-pub(crate) struct AnyClonePartialEqBox {
+pub struct AnyClonePartialEqBox {
     inner: Box<dyn AnyClonePartialEq>,
 }
 
