@@ -1,69 +1,228 @@
 mod any_clone_partial_eq;
 mod closure;
 mod foo;
+mod render;
 
 use any_clone_partial_eq::{AnyClonePartialEq, AnyClonePartialEqBox};
 use closure::Closure;
-use crossbeam_channel::{Receiver, Sender};
+use rayon::prelude::*;
+use render::*;
 use std::{
     any::Any,
     cell::RefCell,
-    collections::HashMap,
-    fmt::Debug,
+    collections::{BTreeSet, HashSet},
+    fmt::{Debug, Formatter},
     ops::Deref,
-    sync::{Arc, Mutex, OnceLock},
+    sync::{atomic::AtomicBool, Arc, Mutex, OnceLock},
 };
+use tokio::sync::mpsc::UnboundedSender;
 
-static SET_STATE_TX: OnceLock<Sender<SetStateInvoked>> = OnceLock::new();
+static SET_STATE_TX: OnceLock<UnboundedSender<SetStateInvoked>> = OnceLock::new();
 
-fn main() {
-    let (tx, rx) = crossbeam_channel::unbounded();
+#[tokio::main]
+async fn main() {
+    real_main().await;
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct Key {
+    items: Vec<usize>,
+}
+impl Key {
+    fn root() -> Key {
+        Key { items: vec![0] }
+    }
+
+    fn depth(&self) -> usize {
+        self.items.len()
+    }
+}
+
+struct ComponentTreeNode {
+    children: Vec<ComponentTreeNode>,
+}
+impl ComponentTreeNode {
+    fn new() -> ComponentTreeNode {
+        todo!()
+    }
+
+    fn get_child(&self, key_item: usize) -> Option<&Self> {
+        self.children.get(key_item)
+    }
+    fn get_child_mut(&mut self, key_item: usize) -> Option<&mut Self> {
+        self.children.get_mut(key_item)
+    }
+    fn put_component(&mut self, key_item: usize, component: impl Component) {
+        todo!()
+    }
+}
+
+fn start(root: impl Component) {
+    let key = Key::root();
+    mount_to(&key, root);
+}
+
+fn mount_to(key: &Key, component: impl Component) {
+    put_to_node(&key, component);
+    invoke_update(&key);
+}
+
+fn invoke_update(key: &Key) {
+    todo!()
+}
+
+static COMPONENT_TREE: OnceLock<Arc<Mutex<ComponentTreeNode>>> = OnceLock::new();
+
+fn put_to_node(key: &Key, component: impl Component) {
+    let mut head = COMPONENT_TREE
+        .get_or_init(|| Arc::new(Mutex::new(ComponentTreeNode::new())))
+        .lock()
+        .unwrap();
+    let (last_key_item, rest) = key.items.split_last().unwrap();
+    let mut node: &mut ComponentTreeNode = &mut head;
+    for key_item in rest {
+        node = node.get_child_mut(*key_item).unwrap();
+    }
+    node.put_component(*last_key_item, component);
+}
+
+async fn update_task(mut updated_component_key_rx: tokio::sync::mpsc::UnboundedReceiver<Key>) {
+    let mut updated_componet_keys_by_depth = Vec::new();
+
+    while let Some(key) = updated_component_key_rx.recv().await {
+        insert_key(&mut updated_componet_keys_by_depth, key);
+        loop {
+            while let Ok(key) = updated_component_key_rx.try_recv() {
+                insert_key(&mut updated_componet_keys_by_depth, key);
+            }
+
+            let Some(keys) = updated_componet_keys_by_depth
+                .iter_mut()
+                .find(|keys| !keys.is_empty()) else {
+                    break;
+                };
+
+            update_components(keys.drain());
+        }
+    }
+
+    fn insert_key(keys: &mut Vec<HashSet<Key>>, key: Key) {
+        let depth = key.depth();
+
+        if keys.len() <= depth {
+            keys.resize(depth + 1, HashSet::new());
+        }
+
+        keys[depth].insert(key);
+    }
+}
+
+fn update_components(keys: impl Iterator<Item = Key>) {
+    let head = COMPONENT_TREE.get().unwrap().lock().unwrap();
+    keys.map(|key| {
+        let (last_key_item, rest) = key.items.split_last().unwrap();
+        let mut node: &ComponentTreeNode = &head;
+        for key_item in rest {
+            node = node.get_child(*key_item).unwrap();
+        }
+        (node, *last_key_item)
+    })
+    .collect::<Vec<_>>()
+    .into_par_iter()
+    .for_each(|(component_tree_node, key)| {
+        update_component(component_tree_node, key);
+    });
+}
+
+fn update_component(component_tree_node: &ComponentTreeNode, key: usize) {
+    // ready thread local
+
+    todo!()
+}
+
+fn draw_task() {
+    // while on_rendering_frame() {
+    //     let rendered = clone_rendered();
+    //     send_rendered_to_platform(rendered);
+    // }
+}
+
+async fn real_main() {
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
     SET_STATE_TX.get_or_init(|| tx);
 
-    let root = foo::Foo { b: 1 }.component();
+    start(foo::Foo { b: 1 });
 
-    let head = 0;
-    let mut stored_elements: Vec<Option<Element>> = vec![];
+    // let head = 0;
+    // let stored_elements: Arc<Mutex<Vec<Option<Element>>>> = Arc::new(Mutex::new(vec![]));
+    // let (state_updated_watch_tx, mut state_updated_watch_rx) = tokio::sync::watch::channel(());
+    // let updated_component_ids = Arc::new(Mutex::new(BTreeSet::new()));
 
-    mount(root, head, &mut stored_elements);
+    // {
+    //     let mut stored_elements = stored_elements.lock().unwrap();
+    //     mount(root, head, &mut stored_elements);
+    //     match stored_elements.last().unwrap() {
+    //         Some(element) => match element {
+    //             Element::Native(native) => {
+    //                 let button = native.as_any().downcast_ref::<Button>().unwrap();
+    //                 button.on_click.invoke(())
+    //             }
+    //             Element::Component { props, render } => todo!(),
+    //         },
+    //         None => todo!(),
+    //     };
+    // }
 
-    for (i, element) in stored_elements.iter().enumerate() {
-        let debug_text = match element {
-            Some(element) => match element {
-                Element::Native(_) => "Native",
-                Element::Component { props, render } => "Component",
-            },
-            None => "None",
-        };
-        println!("{}: {:?}", i, debug_text);
-    }
+    // let state_update_task = tokio::spawn({
+    //     let updated_component_ids = updated_component_ids.clone();
+    //     async move {
+    //         while let Some(set_state) = rx.recv().await {
+    //             let component_id = set_state.component_id;
+    //             set_state.update_state();
+    //             {
+    //                 updated_component_ids.lock().unwrap().insert(component_id);
+    //             }
+    //             state_updated_watch_tx.send(()).unwrap();
+    //         }
+    //     }
+    // });
 
-    match stored_elements.last().unwrap() {
-        Some(element) => match element {
-            Element::Native(native) => {
-                let button = native.as_any().downcast_ref::<Button>().unwrap();
-                button.on_click.invoke(())
-            }
-            Element::Component { props, render } => todo!(),
-        },
-        None => todo!(),
-    };
+    // let re_render_task = tokio::spawn({
+    //     let updated_component_ids = updated_component_ids.clone();
+    //     async move {
+    //         while state_updated_watch_rx.changed().await.is_ok() {
+    //             while let Some(component_id) = { updated_component_ids.lock().unwrap().pop_first() }
+    //             {
+    //                 let mut stored_elements = stored_elements.lock().unwrap();
+    //                 re_render(component_id, &mut stored_elements);
 
-    while let Ok(set_state) = rx.recv() {
-        set_state.update_state();
-        re_render(set_state.component_id, &mut stored_elements);
+    //                 for (i, element) in stored_elements.iter().enumerate() {
+    //                     let debug_text = match element {
+    //                         Some(element) => match element {
+    //                             Element::Native(_) => "Native",
+    //                             Element::Component { props, render } => "Component",
+    //                         },
+    //                         None => "None",
+    //                     };
+    //                     println!("{}: {:?}", i, debug_text);
+    //                 }
 
-        match stored_elements.last().unwrap() {
-            Some(element) => match element {
-                Element::Native(native) => {
-                    let button = native.as_any().downcast_ref::<Button>().unwrap();
-                    button.on_click.invoke(())
-                }
-                Element::Component { props, render } => todo!(),
-            },
-            None => todo!(),
-        };
-    }
+    //                 match stored_elements.last().unwrap() {
+    //                     Some(element) => match element {
+    //                         Element::Native(native) => {
+    //                             let button = native.as_any().downcast_ref::<Button>().unwrap();
+    //                             button.on_click.invoke(())
+    //                         }
+    //                         Element::Component { props, render } => todo!(),
+    //                     },
+    //                     None => todo!(),
+    //                 };
+    //             }
+    //         }
+    //     }
+    // });
+
+    // tokio::try_join!(state_update_task, re_render_task).unwrap();
 }
 
 fn re_render(head: usize, stored_elements: &mut Vec<Option<Element>>) {
@@ -81,6 +240,7 @@ fn re_render(head: usize, stored_elements: &mut Vec<Option<Element>>) {
 }
 
 fn mount(element: Element, head: usize, stored_elements: &mut Vec<Option<Element>>) {
+    // 여기서 직접 재렌더링 하지 말고, updated_component_ids에 넣거나 해서 여러 update에 대해 한번만 렌더링 되게 해야해.
     let stored = {
         while stored_elements.len() <= head {
             stored_elements.push(None);
@@ -191,28 +351,71 @@ pub enum Element {
     },
 }
 
-trait Component {
-    fn render(&self) -> Element;
-    fn component(self) -> Element;
-}
+unsafe impl Sync for Element {}
+unsafe impl Send for Element {}
 
-struct DirtyCheck<'a, Item> {
-    item: &'a mut Item,
-    dirty: bool,
-}
+pub trait Component {
+    fn render(&self, render: Render) -> Render;
+    fn to_element(self) -> Element
+    where
+        Self: Clone + Any + Debug + PartialEq,
+    {
+        Element::Component {
+            props: Box::new(self),
+            render: |props| {
+                todo!()
+                // let render = Render::new();
 
-impl<Item> std::ops::Deref for DirtyCheck<'_, Item> {
-    type Target = Item;
-
-    fn deref(&self) -> &Self::Target {
-        &self.item
+                // props
+                //     .as_any()
+                //     .downcast_ref::<Self>()
+                //     .unwrap()
+                //     .render(render)
+                //     .to_element()
+            },
+        }
+    }
+    fn add_to_render(self, render: &mut Render)
+    where
+        Self: Sized + 'static,
+    {
+        render.add_component(self);
     }
 }
 
-impl<Item> std::ops::DerefMut for DirtyCheck<'_, Item> {
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        self.dirty = true;
-        &mut self.item
+impl<T0, T1> Component for (T0, T1)
+where
+    T0: Component,
+    T1: Component,
+{
+    fn render(&self, _render: Render) -> Render {
+        unreachable!()
+    }
+    fn add_to_render(self, render: &mut Render)
+    where
+        Self: Sized + 'static,
+    {
+        self.0.add_to_render(render);
+        self.1.add_to_render(render);
+    }
+}
+
+impl<T0, T1, T2> Component for (T0, T1, T2)
+where
+    T0: Component,
+    T1: Component,
+    T2: Component,
+{
+    fn render(&self, _render: Render) -> Render {
+        unreachable!()
+    }
+    fn add_to_render(self, render: &mut Render)
+    where
+        Self: Sized + 'static,
+    {
+        self.0.add_to_render(render);
+        self.1.add_to_render(render);
+        self.2.add_to_render(render);
     }
 }
 
@@ -258,11 +461,12 @@ struct Button {
 }
 
 impl Component for Button {
-    fn render(&self) -> Element {
-        unreachable!()
-    }
-    fn component(self) -> Element {
+    fn to_element(self) -> Element {
         Element::Native(Box::new(self))
+    }
+
+    fn render(&self, render: Render) -> Render {
+        todo!()
     }
 }
 
@@ -278,12 +482,21 @@ struct SetStateInvoked {
     state_index: usize,
     state: Arc<dyn AnyClonePartialEq>,
 }
+impl Debug for SetStateInvoked {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SetStateInvoked")
+            .field("component_id", &self.component_id)
+            .field("state_index", &self.state_index)
+            .finish()
+    }
+}
 impl SetStateInvoked {
-    fn update_state(&self) {
+    fn update_state(self) {
         STORED_STATES.with(move |state| {
             let mut state = state.borrow_mut();
+            println!("self.state_index: {}", self.state_index);
             let state = state.get_mut(self.state_index).unwrap();
-            *state = self.state.clone();
+            *state = self.state;
         });
     }
 }
@@ -343,4 +556,10 @@ fn state<'a, T: 'static + Any + Clone + PartialEq + Debug>(initial: T) -> (&'a T
 
     let state_ref = unsafe { &*state_ptr };
     (state_ref.as_any().downcast_ref::<T>().unwrap(), set_state)
+}
+
+thread_local! {
+    static STORED_SIGNALS: RefCell<Vec<Arc<dyn AnyClonePartialEq>>> = RefCell::new(vec![]);
+
+    static STORED_SIGNAL_INDEX: RefCell<usize> = RefCell::new(0);
 }
