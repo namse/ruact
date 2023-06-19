@@ -1,21 +1,23 @@
 mod any_clone_partial_eq;
 mod closure;
+mod component;
 mod foo;
 mod render;
 
 use any_clone_partial_eq::{AnyClonePartialEq, AnyClonePartialEqBox};
 use closure::Closure;
+use component::*;
 use rayon::prelude::*;
 use render::*;
 use std::{
     any::Any,
     cell::RefCell,
-    collections::{BTreeSet, HashSet},
+    collections::{BTreeSet, HashSet, VecDeque},
     fmt::{Debug, Formatter},
-    ops::Deref,
+    ops::{Deref, DerefMut},
     sync::{atomic::AtomicBool, Arc, Mutex, OnceLock},
 };
-use tokio::sync::mpsc::UnboundedSender;
+use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 
 static SET_STATE_TX: OnceLock<UnboundedSender<SetStateInvoked>> = OnceLock::new();
 
@@ -29,129 +31,256 @@ struct Key {
     items: Vec<usize>,
 }
 impl Key {
-    fn root() -> Key {
-        Key { items: vec![0] }
+    fn root(key_item: usize) -> Key {
+        Key {
+            items: vec![key_item],
+        }
     }
 
     fn depth(&self) -> usize {
         self.items.len()
     }
+
+    fn push(&self, key_item: usize) -> Key {
+        let mut items = self.items.clone();
+        items.push(key_item);
+        Key { items }
+    }
+}
+
+trait ComponentTree {
+    fn get_child(&self, key_item: usize) -> Option<&ComponentTreeNode>;
+    fn get_child_mut(&mut self, key_item: usize) -> Option<&mut ComponentTreeNode>;
+    fn put_child_component(&mut self, key_item: usize, component: Box<dyn Component>);
+}
+struct ComponentTreeHead {
+    children: Vec<ComponentTreeNode>,
+}
+impl ComponentTreeHead {
+    fn new() -> ComponentTreeHead {
+        ComponentTreeHead {
+            children: Vec::new(),
+        }
+    }
+}
+unsafe impl Send for ComponentTreeHead {}
+unsafe impl Sync for ComponentTreeHead {}
+
+impl ComponentTree for ComponentTreeHead {
+    fn get_child(&self, key_item: usize) -> Option<&ComponentTreeNode> {
+        self.children.get(key_item)
+    }
+
+    fn get_child_mut(&mut self, key_item: usize) -> Option<&mut ComponentTreeNode> {
+        self.children.get_mut(key_item)
+    }
+
+    fn put_child_component(&mut self, key_item: usize, component: Box<dyn Component>) {
+        match self.children.get_mut(key_item) {
+            Some(child) => child.component = component,
+            None => {
+                assert_eq!(key_item, self.children.len());
+                self.children
+                    .push(ComponentTreeNode::new(component, Key::root(key_item)))
+            }
+        }
+    }
 }
 
 struct ComponentTreeNode {
+    component: Box<dyn Component>,
     children: Vec<ComponentTreeNode>,
+    key: Key,
 }
-impl ComponentTreeNode {
-    fn new() -> ComponentTreeNode {
-        todo!()
-    }
+unsafe impl Send for ComponentTreeNode {}
+unsafe impl Sync for ComponentTreeNode {}
 
+impl ComponentTree for ComponentTreeNode {
     fn get_child(&self, key_item: usize) -> Option<&Self> {
         self.children.get(key_item)
     }
     fn get_child_mut(&mut self, key_item: usize) -> Option<&mut Self> {
         self.children.get_mut(key_item)
     }
-    fn put_component(&mut self, key_item: usize, component: impl Component) {
-        todo!()
+    fn put_child_component(&mut self, key_item: usize, component: Box<dyn Component>) {
+        match self.children.get_mut(key_item) {
+            Some(child) => child.component = component,
+            None => {
+                assert_eq!(key_item, self.children.len());
+                self.children
+                    .push(ComponentTreeNode::new(component, self.key.push(key_item)))
+            }
+        }
     }
 }
 
-fn start(root: impl Component) {
-    let key = Key::root();
+impl ComponentTreeNode {
+    fn new(component: Box<dyn Component>, key: Key) -> ComponentTreeNode {
+        ComponentTreeNode {
+            component,
+            children: Vec::new(),
+            key,
+        }
+    }
+
+    fn key(&self) -> &Key {
+        &self.key
+    }
+
+    fn update(&mut self, source: Arc<Source>) {
+        let render = self.component.render(Render::new());
+        for (index, child) in render.into_children().enumerate() {
+            if let Some(prev_child_node) = self.get_child_mut(index) {
+                if !prev_child_node.component.equals(child.as_ref()) {
+                    prev_child_node.component = child;
+                    invoke_update(prev_child_node.key(), source.clone());
+                }
+            } else {
+                self.put_child_component(index, child);
+                invoke_update(&self.key().push(index), source.clone());
+            }
+        }
+    }
+}
+
+fn start(root: impl Component + 'static) {
+    let key = Key::root(0);
     mount_to(&key, root);
 }
 
-fn mount_to(key: &Key, component: impl Component) {
+fn mount_to(key: &Key, component: impl Component + 'static) {
     put_to_node(&key, component);
-    invoke_update(&key);
+    invoke_update(&key, Arc::new(()));
 }
 
-fn invoke_update(key: &Key) {
-    todo!()
+fn invoke_update(key: &Key, source: Arc<Source>) {
+    UPDATE_REQUEST_TX
+        .get()
+        .unwrap()
+        .send(UpdateRequest {
+            key: key.clone(),
+            source,
+        })
+        .unwrap();
 }
 
-static COMPONENT_TREE: OnceLock<Arc<Mutex<ComponentTreeNode>>> = OnceLock::new();
+static COMPONENT_TREE: OnceLock<Arc<Mutex<ComponentTreeHead>>> = OnceLock::new();
 
-fn put_to_node(key: &Key, component: impl Component) {
+fn put_to_node(key: &Key, component: impl Component + 'static) {
     let mut head = COMPONENT_TREE
-        .get_or_init(|| Arc::new(Mutex::new(ComponentTreeNode::new())))
+        .get_or_init(|| Arc::new(Mutex::new(ComponentTreeHead::new())))
         .lock()
         .unwrap();
     let (last_key_item, rest) = key.items.split_last().unwrap();
-    let mut node: &mut ComponentTreeNode = &mut head;
+    let mut node: &mut dyn ComponentTree = head.deref_mut();
     for key_item in rest {
         node = node.get_child_mut(*key_item).unwrap();
     }
-    node.put_component(*last_key_item, component);
+    node.put_child_component(*last_key_item, Box::new(component));
 }
 
-async fn update_task(mut updated_component_key_rx: tokio::sync::mpsc::UnboundedReceiver<Key>) {
-    let mut updated_componet_keys_by_depth = Vec::new();
+#[derive(Debug, Clone)]
+struct UpdateRequest {
+    key: Key,
+    source: Arc<()>,
+}
 
-    while let Some(key) = updated_component_key_rx.recv().await {
-        insert_key(&mut updated_componet_keys_by_depth, key);
+type Source = ();
+
+static UPDATE_REQUEST_TX: OnceLock<UnboundedSender<UpdateRequest>> = OnceLock::new();
+
+async fn update_task(mut update_request_rx: UnboundedReceiver<UpdateRequest>) {
+    let mut update_merged_queue: VecDeque<UpdateRequest> = VecDeque::new();
+
+    let mut prev_handling_source: Option<Arc<Source>> = None;
+    while let Some(request) = update_request_rx.recv().await {
+        println!("update_task: {:?}", request);
+        let handling_source = prev_handling_source
+            .take()
+            .unwrap_or_else(|| request.source.clone());
+
+        insert_request(&mut update_merged_queue, request);
+
         loop {
-            while let Ok(key) = updated_component_key_rx.try_recv() {
-                insert_key(&mut updated_componet_keys_by_depth, key);
+            while let Ok(request) = update_request_rx.try_recv() {
+                println!("update_task: {:?}", request);
+                insert_request(&mut update_merged_queue, request);
             }
+            match pop_request_of_source(&mut update_merged_queue, &handling_source) {
+                Some(request) => {
+                    update_component(request);
 
-            let Some(keys) = updated_componet_keys_by_depth
-                .iter_mut()
-                .find(|keys| !keys.is_empty()) else {
+                    if is_update_of_source_finished(&handling_source) {
+                        draw();
+                        break;
+                    }
+
+                    tokio::task::yield_now().await;
+                }
+                None => {
+                    prev_handling_source = Some(handling_source);
                     break;
-                };
-
-            update_components(keys.drain());
+                }
+            }
         }
     }
 
-    fn insert_key(keys: &mut Vec<HashSet<Key>>, key: Key) {
-        let depth = key.depth();
-
-        if keys.len() <= depth {
-            keys.resize(depth + 1, HashSet::new());
+    fn insert_request(merged_queue: &mut VecDeque<UpdateRequest>, request: UpdateRequest) {
+        match merged_queue
+            .iter_mut()
+            .find(|merged| merged.key == request.key)
+        {
+            Some(merged) => {
+                return;
+            }
+            None => {
+                merged_queue.push_back(request);
+            }
         }
-
-        keys[depth].insert(key);
     }
 }
 
-fn update_components(keys: impl Iterator<Item = Key>) {
-    let head = COMPONENT_TREE.get().unwrap().lock().unwrap();
-    keys.map(|key| {
-        let (last_key_item, rest) = key.items.split_last().unwrap();
-        let mut node: &ComponentTreeNode = &head;
-        for key_item in rest {
-            node = node.get_child(*key_item).unwrap();
-        }
-        (node, *last_key_item)
-    })
-    .collect::<Vec<_>>()
-    .into_par_iter()
-    .for_each(|(component_tree_node, key)| {
-        update_component(component_tree_node, key);
-    });
+fn draw() {
+    println!("draw!");
 }
 
-fn update_component(component_tree_node: &ComponentTreeNode, key: usize) {
-    // ready thread local
-
-    todo!()
+fn is_update_of_source_finished(source: &Arc<Source>) -> bool {
+    Arc::strong_count(source) == 1
 }
 
-fn draw_task() {
-    // while on_rendering_frame() {
-    //     let rendered = clone_rendered();
-    //     send_rendered_to_platform(rendered);
-    // }
+fn pop_request_of_source(
+    update_merged_queue: &mut VecDeque<UpdateRequest>,
+    source: &Arc<Source>,
+) -> Option<UpdateRequest> {
+    update_merged_queue
+        .iter()
+        .position(|merged| Arc::ptr_eq(&merged.source, source))
+        .map(|index| update_merged_queue.remove(index).unwrap())
+}
+
+fn update_component(request: UpdateRequest) {
+    let mut head = COMPONENT_TREE.get().unwrap().lock().unwrap();
+    let (first, rest) = request.key.items.split_first().unwrap();
+    let mut node: &mut ComponentTreeNode = head.get_child_mut(*first).unwrap();
+    for key_item in rest {
+        node = node
+            .get_child_mut(*key_item)
+            .expect(&format!("ComponentTreeNode not found: {:?}", request.key));
+    }
+    node.update(request.source);
 }
 
 async fn real_main() {
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
     SET_STATE_TX.get_or_init(|| tx);
 
+    let (update_request_tx, update_request_rx) = tokio::sync::mpsc::unbounded_channel();
+    UPDATE_REQUEST_TX.get_or_init(|| update_request_tx);
+    let task = tokio::spawn(update_task(update_request_rx));
+
     start(foo::Foo { b: 1 });
+
+    task.await.unwrap();
 
     // let head = 0;
     // let stored_elements: Arc<Mutex<Vec<Option<Element>>>> = Arc::new(Mutex::new(vec![]));
@@ -354,71 +483,6 @@ pub enum Element {
 unsafe impl Sync for Element {}
 unsafe impl Send for Element {}
 
-pub trait Component {
-    fn render(&self, render: Render) -> Render;
-    fn to_element(self) -> Element
-    where
-        Self: Clone + Any + Debug + PartialEq,
-    {
-        Element::Component {
-            props: Box::new(self),
-            render: |props| {
-                todo!()
-                // let render = Render::new();
-
-                // props
-                //     .as_any()
-                //     .downcast_ref::<Self>()
-                //     .unwrap()
-                //     .render(render)
-                //     .to_element()
-            },
-        }
-    }
-    fn add_to_render(self, render: &mut Render)
-    where
-        Self: Sized + 'static,
-    {
-        render.add_component(self);
-    }
-}
-
-impl<T0, T1> Component for (T0, T1)
-where
-    T0: Component,
-    T1: Component,
-{
-    fn render(&self, _render: Render) -> Render {
-        unreachable!()
-    }
-    fn add_to_render(self, render: &mut Render)
-    where
-        Self: Sized + 'static,
-    {
-        self.0.add_to_render(render);
-        self.1.add_to_render(render);
-    }
-}
-
-impl<T0, T1, T2> Component for (T0, T1, T2)
-where
-    T0: Component,
-    T1: Component,
-    T2: Component,
-{
-    fn render(&self, _render: Render) -> Render {
-        unreachable!()
-    }
-    fn add_to_render(self, render: &mut Render)
-    where
-        Self: Sized + 'static,
-    {
-        self.0.add_to_render(render);
-        self.1.add_to_render(render);
-        self.2.add_to_render(render);
-    }
-}
-
 struct ComponentContext {
     effect_index: usize,
     effect_deps: Vec<AnyClonePartialEqBox>,
@@ -466,7 +530,8 @@ impl Component for Button {
     }
 
     fn render(&self, render: Render) -> Render {
-        todo!()
+        println!("render button");
+        render
     }
 }
 

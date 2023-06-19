@@ -58,48 +58,47 @@ impl Component for Foo {
         )
         */
 
-        render
-            .add(Button {
-                on_click: closure((*a, set_a), |_, (a, set_a)| {
-                    ATOM_TEST.update(|test| {
-                        test.a += 1;
-                    });
-                    set_a.i(a + 1);
-                }),
-            })
-            .add(Button {
-                on_click: closure((*a, set_a), |_, (a, set_a)| {
-                    ATOM_TEST.update(|test| {
-                        test.a += 1;
-                    });
-                    set_a.i(a + 1);
-                }),
-            })
-            .add((
-                Button {
-                    on_click: closure((*a, set_a), |_, (a, set_a)| {
-                        ATOM_TEST.update(|test| {
-                            test.a += 1;
-                        });
-                        set_a.i(a + 1);
-                    }),
-                },
-                Button {
-                    on_click: closure((*a, set_a), |_, (a, set_a)| {
-                        ATOM_TEST.update(|test| {
-                            test.a += 1;
-                        });
-                        set_a.i(a + 1);
-                    }),
-                },
-                Button {
-                    on_click: closure((*a, set_a), |_, (a, set_a)| {
-                        ATOM_TEST.update(|test| {
-                            test.a += 1;
-                        });
-                        set_a.i(a + 1);
-                    }),
-                },
-            ))
+        render.add(Button {
+            on_click: closure((*a, set_a), |_, (a, set_a)| {
+                ATOM_TEST.update(|test| {
+                    test.a += 1;
+                });
+                set_a.i(a + 1);
+            }),
+        })
+        //     .add(Button {
+        //         on_click: closure((*a, set_a), |_, (a, set_a)| {
+        //             ATOM_TEST.update(|test| {
+        //                 test.a += 1;
+        //             });
+        //             set_a.i(a + 1);
+        //         }),
+        //     })
+        //     .add((
+        //         Button {
+        //             on_click: closure((*a, set_a), |_, (a, set_a)| {
+        //                 ATOM_TEST.update(|test| {
+        //                     test.a += 1;
+        //                 });
+        //                 set_a.i(a + 1);
+        //             }),
+        //         },
+        //         Button {
+        //             on_click: closure((*a, set_a), |_, (a, set_a)| {
+        //                 ATOM_TEST.update(|test| {
+        //                     test.a += 1;
+        //                 });
+        //                 set_a.i(a + 1);
+        //             }),
+        //         },
+        //         Button {
+        //             on_click: closure((*a, set_a), |_, (a, set_a)| {
+        //                 ATOM_TEST.update(|test| {
+        //                     test.a += 1;
+        //                 });
+        //                 set_a.i(a + 1);
+        //             }),
+        //         },
+        //     ))
     }
 }

@@ -25,4 +25,8 @@ impl Render {
     pub(crate) fn add_component(&mut self, component: impl Component + 'static) {
         self.vec.push(Box::new(component));
     }
+
+    pub(crate) fn into_children(self) -> impl Iterator<Item = Box<dyn Component>> {
+        self.vec.into_iter()
+    }
 }
