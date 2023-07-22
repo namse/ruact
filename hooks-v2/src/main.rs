@@ -24,11 +24,11 @@ impl Component for MyComponent {
             |event| match event {
                 Event::OnClick => set_count.set(count + 1),
             },
-            |renderer| {
-                renderer.add(Button {
+            || {
+                Button {
                     // on_click: ctx.event(Event::OnClick),
                     on_click: self.on_something.clone(),
-                })
+                }
             },
         )
     }
@@ -51,10 +51,8 @@ impl Component for Button {
             |event| match event {
                 Event::OnClick => {}
             },
-            |renderer| {
-                renderer.add(Button {
-                    on_click: ctx.event(Event::OnClick),
-                })
+            || Button {
+                on_click: ctx.event(Event::OnClick),
             },
         )
     }

@@ -32,16 +32,11 @@ impl<Event: 'static> Context<Event> {
         handle_use_state(self, init)
     }
 
-    pub fn spec<
-        'a,
-        Effects: 'a + FnOnce(&EffectContext<'a, Event>),
-        OnEvent: 'a + FnOnce(Event),
-        Render: 'a + FnOnce(&mut Renderer),
-    >(
+    pub fn spec<'a, C: Component>(
         &'a self,
-        effects: Effects,
-        on_event: OnEvent,
-        render: Render,
+        effects: impl 'a + FnOnce(&EffectContext<'a, Event>),
+        on_event: impl 'a + FnOnce(Event),
+        render: impl 'a + FnOnce() -> C,
     ) -> ContextDone {
         let effect_context = EffectContext { context: self };
         effects(&effect_context);
