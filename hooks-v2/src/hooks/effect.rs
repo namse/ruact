@@ -1,44 +1,31 @@
 use super::*;
 
-pub trait AnyPartialEqClone {
-    fn eq(&self, other: &dyn Any) -> bool;
-    fn clone_arc(&self) -> Arc<dyn AnyPartialEqClone>;
-}
-
-impl<T: PartialEq + Clone + 'static> AnyPartialEqClone for T {
-    fn eq(&self, other: &dyn Any) -> bool {
-        other
-            .downcast_ref::<Self>()
-            .map(|other| self == other)
-            .unwrap_or(false)
-    }
-
-    fn clone_arc(&self) -> Arc<dyn AnyPartialEqClone> {
-        Arc::new(self.clone())
-    }
-}
-
-pub(crate) fn handle_use_effect<'a, Event, Deps: AnyPartialEqClone + 'static>(
-    context: &'a Context<Event>,
-    deps: &'a Deps,
-    effect: impl FnOnce(),
-) {
+pub(crate) fn handle_effect<'a, Event>(context: &'a Context<Event>, effect: impl FnOnce()) {
     unsafe {
-        let effect_deps_list = context.effect_deps_list.as_ptr().as_mut().unwrap();
+        let effect_used_signals_list = context
+            .instance
+            .effect_used_signals_list
+            .as_ptr()
+            .as_mut()
+            .unwrap();
+        let effect_index = context
+            .effect_index
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
 
-        let prev_deps = effect_deps_list.get(
-            context
-                .effect_index
-                .fetch_add(1, std::sync::atomic::Ordering::SeqCst),
-        );
+        let is_first_run = || effect_used_signals_list.len() <= effect_index;
 
-        if match prev_deps {
-            Some(prev_deps) => !prev_deps.eq(deps),
-            None => true,
-        } {
-            effect_deps_list.push(deps.clone_arc());
+        let used_signal_updated = || {
+            let used_signals = effect_used_signals_list.get(effect_index).unwrap();
 
+            used_signals
+                .into_iter()
+                .any(|signal_id| context.is_signal_updated(*signal_id))
+        };
+
+        if is_first_run() || used_signal_updated() {
             effect();
+            let used_signal_ids = take_used_signals();
+            effect_used_signals_list.insert(effect_index, used_signal_ids);
         }
     }
 }
