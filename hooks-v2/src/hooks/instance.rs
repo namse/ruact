@@ -1,8 +1,9 @@
 use super::*;
-use std::fmt::Debug;
+use std::{any::TypeId, fmt::Debug};
 
 pub(crate) struct ComponentInstance {
     pub(crate) component_id: usize,
+    pub(crate) component_type_id: TypeId,
     pub(crate) state_list: AtomicCell<Vec<Arc<dyn Any>>>,
     pub(crate) effect_used_signals_list: AtomicCell<Vec<Vec<SignalId>>>,
     pub(crate) memo_value_list: AtomicCell<Vec<Arc<dyn Any>>>,
@@ -33,9 +34,10 @@ impl Debug for ComponentInstance {
 }
 
 impl ComponentInstance {
-    pub(crate) fn new(component_id: usize) -> Self {
+    pub(crate) fn new(component_id: usize, component_type_id: TypeId) -> Self {
         Self {
             component_id,
+            component_type_id,
             state_list: AtomicCell::new(Vec::new()),
             effect_used_signals_list: AtomicCell::new(Vec::new()),
             memo_value_list: AtomicCell::new(Vec::new()),

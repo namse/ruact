@@ -2,6 +2,7 @@ mod hooks;
 
 use hooks::*;
 use std::{
+    any::{Any, TypeId},
     collections::{HashMap, HashSet},
     fmt::Debug,
     sync::Arc,
@@ -31,6 +32,12 @@ impl Component for MyComponent {
     }
 }
 
+impl StaticTypeId for MyComponent {
+    fn type_id(&self) -> TypeId {
+        TypeId::of::<MyComponent>()
+    }
+}
+
 mod without_event {
     use super::*;
     struct MyComponent {
@@ -55,6 +62,12 @@ mod without_event {
             })
         }
     }
+
+    impl StaticTypeId for MyComponent {
+        fn type_id(&self) -> TypeId {
+            TypeId::of::<MyComponent>()
+        }
+    }
 }
 
 fn get_fibo(x: u32) -> u32 {
@@ -72,6 +85,12 @@ struct Button<'a> {
     on_click: EventCallback,
 }
 
+impl StaticTypeId for Button<'_> {
+    fn type_id(&self) -> TypeId {
+        TypeId::of::<Button<'static>>()
+    }
+}
+
 impl Component for Button<'_> {
     fn component<'a>(&self, ctx: &'a Context) -> ContextDone<'a> {
         ctx.effect("Print text on text effect", || {
@@ -84,7 +103,11 @@ impl Component for Button<'_> {
             println!("Button rendered");
         });
 
-        ContextDone::Native
+        ContextDone::Native {
+            native: Native::Button {
+                on_click: self.on_click.clone(),
+            },
+        }
     }
 }
 
@@ -184,18 +207,101 @@ impl<'lifetime> Holder<'lifetime> {
 
 fn main() {
     let root = MyComponent {};
-    let component_instance = ComponentInstance::new(0);
-    let updated_signals = HashSet::new();
-    let context = Context::new(ContextFor::Mount, &component_instance, &updated_signals);
-
-    let done = root.component(&context);
-
-    println!("instance: {:#?}", component_instance);
-    println!("done: {:#?}", done);
-
-    println!("--child--");
-
-    let ContextDone::Mount { child } = done else {
-        unreachable!()
-    };
+    start(root);
 }
+
+fn start<T: Component + 'static>(component: T) {
+    init_event_channel();
+    let holder = next(Box::new(component));
+
+    // match native {
+    //     Native::Button { on_click } => {
+    //         println!("Button clicked");
+    //         on_click.call();
+    //     }
+    // }
+
+    // while let Ok(event) = EVENT_RX.get().unwrap().recv() {
+    //     println!("Event Recv: {:#?}", event);
+    // }
+
+    struct ComponentHolder<'a> {
+        component: Box<dyn Component + 'a>,
+        component_instance: ComponentInstance,
+        children: Vec<Child<'a>>,
+    }
+
+    enum Child<'a> {
+        Component { component: ComponentHolder<'a> },
+        Native { native: Native },
+    }
+
+    fn next<'a>(component: Box<dyn Component + 'a>) -> ComponentHolder<'a> {
+        let type_id = component.as_ref().type_id();
+        let component_instance = ComponentInstance::new(0, type_id);
+
+        let mut holder = ComponentHolder {
+            component,
+            component_instance,
+            children: vec![],
+        };
+
+        {
+            let updated_signals = HashSet::new();
+            let context = Context::new(
+                ContextFor::Mount,
+                &holder.component_instance,
+                &updated_signals,
+            );
+
+            let done = holder.component.component(&context);
+
+            println!("instance: {:#?}", holder.component_instance);
+            println!("done: {:#?}", done);
+
+            match done {
+                ContextDone::Mount { child } => {
+                    holder.children.push(Child::Component {
+                        component: next(child),
+                    });
+                }
+                ContextDone::Event => unreachable!(),
+                ContextDone::Native { native } => {
+                    println!("Native. Done!");
+                    holder.children.push(Child::Native { native });
+                }
+            }
+        }
+
+        holder
+        // match done {
+        //     ContextDone::Mount { child } =>
+        //     // next(child)
+        //     {
+        //         todo!()
+        //     }
+        //     ContextDone::Event => unreachable!(),
+        //     ContextDone::Native { native } => {
+        //         println!("Native. Done!");
+        //         native
+        //     }
+        // }
+    }
+}
+
+/*
+- Start
+root부터 최말단까지 component instance를 만들어서 저장하고, native component를 시스템에 연결하는 것.
+시스템은 native component를 바탕으로 렌더링, I/O 등을 진행.
+
+- OnEvent
+시스템이 마우스 클릭과 같은 event를 받으면, 그 이벤트를 처리할 Component를 찾는다.
+Component가 없다면 로그를 찍고 넘어간다.
+Component가 있다면 그 컴포넌트에 Event를 건네줘서, 이벤트 처리를 할 수 있게 해준다.
+
+- OnSignal
+모종의 이유로 signal이 변경되었을 때 발동한다.
+Root에서부터 signal을 subscribe한 컴포넌트를 찾아나간다.
+컴포넌트 내 signal subscriber를 찾아서 재실행해준다.
+참고로, set_state는 곧장 실행되지 않는다. 다음 OnSignal tick때 진행한다.
+*/

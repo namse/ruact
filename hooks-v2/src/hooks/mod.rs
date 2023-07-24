@@ -1,4 +1,5 @@
 mod effect;
+mod event;
 mod instance;
 mod memo;
 mod signal;
@@ -6,12 +7,13 @@ mod state;
 
 use crossbeam::atomic::AtomicCell;
 use effect::*;
+pub use event::*;
 pub use instance::*;
 pub use memo::*;
 pub use signal::*;
 pub use state::*;
 use std::{
-    any::Any,
+    any::{Any, TypeId},
     collections::HashSet,
     fmt::Debug,
     sync::{atomic::AtomicUsize, Arc},
@@ -144,7 +146,12 @@ impl<Event: 'static> EventContext<Event> {
 pub enum ContextDone<'a> {
     Mount { child: Box<dyn Component + 'a> },
     Event,
-    Native,
+    Native { native: Native },
+}
+
+#[derive(Debug)]
+pub enum Native {
+    Button { on_click: EventCallback },
 }
 
 impl Debug for ContextDone<'_> {
@@ -152,22 +159,15 @@ impl Debug for ContextDone<'_> {
         match self {
             ContextDone::Mount { .. } => write!(f, "ContextDone::Mount"),
             ContextDone::Event => write!(f, "ContextDone::Event"),
-            ContextDone::Native => write!(f, "ContextDone::Native"),
+            ContextDone::Native { native } => write!(f, "ContextDone::Native({:?})", native),
         }
     }
 }
 
-pub trait Component {
+pub trait Component: StaticTypeId {
     fn component<'a>(&self, ctx: &'a Context) -> ContextDone<'a>;
 }
 
-#[derive(Clone)]
-pub struct EventCallback {
-    pub(crate) component_id: usize,
-    pub(crate) event: Arc<dyn Any>,
-}
-impl EventCallback {
-    pub(crate) fn call(&self) {
-        todo!()
-    }
+pub trait StaticTypeId {
+    fn type_id(&self) -> TypeId;
 }
