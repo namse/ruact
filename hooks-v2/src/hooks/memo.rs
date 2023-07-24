@@ -1,7 +1,7 @@
 use super::*;
 
-pub(crate) fn handle_memo<'a, Event, T: 'static>(
-    context: &'a Context<Event>,
+pub(crate) fn handle_memo<'a, T: 'static>(
+    context: &'a Context,
     memo: impl FnOnce() -> T,
 ) -> Signal<'a, T> {
     unsafe {

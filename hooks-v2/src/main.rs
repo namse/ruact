@@ -14,19 +14,18 @@ enum Event {
 }
 
 impl Component for MyComponent {
-    type Event = Event;
-    fn component<'a>(&self, ctx: &'a Context<Event>) -> ContextDone<'a> {
+    fn component<'a>(&self, ctx: &'a Context) -> ContextDone<'a> {
         let (count, set_count) = ctx.state(|| 0);
 
         let fibo = ctx.memo(|| get_fibo(*count));
 
         let text = ctx.memo(|| format!("Count: {}, Fibo: {}", *count, *fibo));
 
-        ctx.spec(
+        ctx.spec_with_event(
             |event| match event {
                 Event::OnClick => set_count.set(*count + 1),
             },
-            || {
+            |ctx| {
                 Button {
                     text,
                     on_click: ctx.event(Event::OnClick),
@@ -34,6 +33,32 @@ impl Component for MyComponent {
                 }
             },
         )
+    }
+}
+
+mod without_spec {
+    use super::*;
+    struct MyComponent {
+        on_something: EventCallback,
+    }
+
+    enum Event {
+        OnClick,
+    }
+
+    impl Component for MyComponent {
+        fn component<'a>(&self, ctx: &'a Context) -> ContextDone<'a> {
+            let (count, set_count) = ctx.state(|| 0);
+
+            let fibo = ctx.memo(|| get_fibo(*count));
+
+            let text = ctx.memo(|| format!("Count: {}, Fibo: {}", *count, *fibo));
+
+            ctx.spec(|| Button {
+                text,
+                on_click: self.on_something.clone(),
+            })
+        }
     }
 }
 
@@ -53,9 +78,7 @@ struct Button<'a> {
 }
 
 impl Component for Button<'_> {
-    type Event = Event;
-
-    fn component<'a>(&self, ctx: &'a Context<Self::Event>) -> ContextDone<'a> {
+    fn component<'a>(&self, ctx: &'a Context) -> ContextDone<'a> {
         ctx.effect("Print text on text effect", || {
             if self.text.on_effect() {
                 println!("Count changed");
@@ -74,8 +97,7 @@ impl AnyComponent for Button<'_> {
     fn mount(&self) {
         let component_instance = ComponentInstance::new(1);
         let updated_signals = HashSet::new();
-        let context =
-            Context::<'_, Event>::new(ContextFor::Mount, &component_instance, &updated_signals);
+        let context = Context::new(ContextFor::Mount, &component_instance, &updated_signals);
 
         let done: ContextDone<'_> = self.component(&context);
 
@@ -182,8 +204,7 @@ fn main() {
     let root = MyComponent {};
     let component_instance = ComponentInstance::new(0);
     let updated_signals = HashSet::new();
-    let context =
-        Context::<'_, Event>::new(ContextFor::Mount, &component_instance, &updated_signals);
+    let context = Context::new(ContextFor::Mount, &component_instance, &updated_signals);
 
     let done = root.component(&context);
 

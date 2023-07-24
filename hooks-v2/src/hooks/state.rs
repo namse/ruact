@@ -9,8 +9,8 @@ impl<State> SetState<State> {
     pub fn mutate(self, mutate: impl FnOnce(&mut State)) {}
 }
 
-pub(crate) fn handle_state<'a, Event, State: Send + Sync + 'static>(
-    context: &'a Context<Event>,
+pub(crate) fn handle_state<'a, State: Send + Sync + 'static>(
+    context: &'a Context,
     init: impl FnOnce() -> State,
 ) -> (Signal<'a, State>, SetState<State>) {
     unsafe {

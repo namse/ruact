@@ -1,6 +1,6 @@
 use super::*;
 
-pub(crate) fn handle_effect<'a, Event>(context: &'a Context<Event>, effect: impl FnOnce()) {
+pub(crate) fn handle_effect<'a>(context: &'a Context, effect: impl FnOnce()) {
     unsafe {
         let effect_used_signals_list = context
             .instance
