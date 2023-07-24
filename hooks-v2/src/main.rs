@@ -16,27 +16,22 @@ enum Event {
 impl Component for MyComponent {
     fn component<'a>(&self, ctx: &'a Context) -> ContextDone<'a> {
         let (count, set_count) = ctx.state(|| 0);
-
         let fibo = ctx.memo(|| get_fibo(*count));
-
         let text = ctx.memo(|| format!("Count: {}, Fibo: {}", *count, *fibo));
 
         ctx.spec_with_event(
             |event| match event {
                 Event::OnClick => set_count.set(*count + 1),
             },
-            |ctx| {
-                Button {
-                    text,
-                    on_click: ctx.event(Event::OnClick),
-                    // on_click: self.on_something.clone(),
-                }
+            |ctx| Button {
+                text,
+                on_click: ctx.event(Event::OnClick),
             },
         )
     }
 }
 
-mod without_spec {
+mod without_event {
     use super::*;
     struct MyComponent {
         on_something: EventCallback,
@@ -90,19 +85,6 @@ impl Component for Button<'_> {
         });
 
         ContextDone::Native
-    }
-}
-
-impl AnyComponent for Button<'_> {
-    fn mount(&self) {
-        let component_instance = ComponentInstance::new(1);
-        let updated_signals = HashSet::new();
-        let context = Context::new(ContextFor::Mount, &component_instance, &updated_signals);
-
-        let done: ContextDone<'_> = self.component(&context);
-
-        println!("instance: {:#?}", component_instance);
-        println!("done: {:#?}", done);
     }
 }
 
@@ -216,5 +198,4 @@ fn main() {
     let ContextDone::Mount { child } = done else {
         unreachable!()
     };
-    let child = child.mount();
 }

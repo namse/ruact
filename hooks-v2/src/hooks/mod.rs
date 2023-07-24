@@ -73,7 +73,7 @@ impl<'ctx> Context<'ctx> {
         handle_effect(self, effect);
     }
 
-    pub fn spec<'a, C: AnyComponent + 'ctx>(
+    pub fn spec<'a, C: Component + 'ctx>(
         &'ctx self,
         render: impl 'a + FnOnce() -> C,
     ) -> ContextDone {
@@ -91,7 +91,7 @@ impl<'ctx> Context<'ctx> {
         }
     }
 
-    pub fn spec_with_event<'a, C: AnyComponent + 'ctx, Event: 'static>(
+    pub fn spec_with_event<'a, C: Component + 'ctx, Event: 'static>(
         &'ctx self,
         on_event: impl 'a + FnOnce(Event),
         render: impl 'a + FnOnce(EventContext<Event>) -> C,
@@ -142,7 +142,7 @@ impl<Event: 'static> EventContext<Event> {
 }
 
 pub enum ContextDone<'a> {
-    Mount { child: Box<dyn AnyComponent + 'a> },
+    Mount { child: Box<dyn Component + 'a> },
     Event,
     Native,
 }
@@ -155,10 +155,6 @@ impl Debug for ContextDone<'_> {
             ContextDone::Native => write!(f, "ContextDone::Native"),
         }
     }
-}
-
-pub trait AnyComponent {
-    fn mount(&self);
 }
 
 pub trait Component {
