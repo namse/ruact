@@ -3,11 +3,13 @@ mod hooks;
 use hooks::*;
 use std::{
     any::{Any, TypeId},
+    cell::{Cell, OnceCell},
     collections::{HashMap, HashSet},
     fmt::Debug,
-    sync::Arc,
+    sync::{atomic::AtomicUsize, Arc},
 };
 
+#[derive(Debug)]
 struct MyComponent {}
 
 enum Event {
@@ -15,14 +17,17 @@ enum Event {
 }
 
 impl Component for MyComponent {
-    fn component<'a>(&self, ctx: &'a Context) -> ContextDone<'a> {
+    fn component<'a>(&'a self, ctx: &'a Context) -> ContextDone {
         let (count, set_count) = ctx.state(|| 0);
         let fibo = ctx.memo(|| get_fibo(*count));
         let text = ctx.memo(|| format!("Count: {}, Fibo: {}", *count, *fibo));
 
         ctx.spec_with_event(
             |event| match event {
-                Event::OnClick => set_count.set(*count + 1),
+                Event::OnClick => {
+                    println!("Clicked");
+                    set_count.set(*count + 1)
+                }
             },
             |ctx| Button {
                 text,
@@ -40,6 +45,8 @@ impl StaticTypeId for MyComponent {
 
 mod without_event {
     use super::*;
+
+    #[derive(Debug)]
     struct MyComponent {
         on_something: EventCallback,
     }
@@ -49,7 +56,7 @@ mod without_event {
     }
 
     impl Component for MyComponent {
-        fn component<'a>(&self, ctx: &'a Context) -> ContextDone<'a> {
+        fn component<'a>(&'a self, ctx: &'a Context) -> ContextDone {
             let (count, set_count) = ctx.state(|| 0);
 
             let fibo = ctx.memo(|| get_fibo(*count));
@@ -80,6 +87,7 @@ fn get_fibo(x: u32) -> u32 {
     get_fibo(x - 1) + get_fibo(x - 2)
 }
 
+#[derive(Debug)]
 struct Button<'a> {
     text: Signal<'a, String>,
     on_click: EventCallback,
@@ -92,7 +100,7 @@ impl StaticTypeId for Button<'_> {
 }
 
 impl Component for Button<'_> {
-    fn component<'a>(&self, ctx: &'a Context) -> ContextDone<'a> {
+    fn component<'a>(&'a self, ctx: &'a Context) -> ContextDone {
         ctx.effect("Print text on text effect", || {
             if self.text.on_effect() {
                 println!("Count changed");
@@ -212,80 +220,160 @@ fn main() {
 
 fn start<T: Component + 'static>(component: T) {
     init_event_channel();
-    let holder = next(Box::new(component));
+    let holder: ComponentHolder = next(OnceCell::from(Box::new(component) as Box<dyn Component>));
 
-    // match native {
-    //     Native::Button { on_click } => {
-    //         println!("Button clicked");
-    //         on_click.call();
-    //     }
-    // }
+    println!("--- visit ---");
+    visit(
+        &holder,
+        &|component| {
+            println!(
+                "Component: {:#?}",
+                component.component.get().unwrap().as_ref()
+            );
+        },
+        &|native| {
+            println!("Native: {:#?}", native);
 
-    // while let Ok(event) = EVENT_RX.get().unwrap().recv() {
-    //     println!("Event Recv: {:#?}", event);
-    // }
+            match native {
+                Native::Button { on_click } => {
+                    println!("Button clicked");
+                    on_click.call();
+                }
+            }
+        },
+    );
+    println!("--- visit done ---");
 
-    struct ComponentHolder<'a> {
-        component: Box<dyn Component + 'a>,
-        component_instance: ComponentInstance,
-        children: Vec<Child<'a>>,
+    while let Ok(event_callback) = EVENT_RX.get().unwrap().recv() {
+        println!("Event Recv: {:#?}", event_callback);
+
+        let holder = find_component(&holder, &|holder| {
+            holder.component_instance.component_id == event_callback.component_id
+        });
+        if let Some(holder) = holder {
+            let updated_signals = Arc::new(HashSet::new());
+            let context = Context::new(
+                ContextFor::Event { event_callback },
+                holder.component_instance.clone(),
+                updated_signals,
+            );
+
+            let ContextDone::Event = holder.component.get().unwrap().component(&context) else {
+                unreachable!()
+            };
+        }
     }
 
-    enum Child<'a> {
-        Component { component: ComponentHolder<'a> },
+    fn find_component<'a>(
+        holder: &'a ComponentHolder,
+        find: &impl Fn(&ComponentHolder) -> bool,
+    ) -> Option<&'a ComponentHolder> {
+        if find(holder) {
+            Some(holder)
+        } else {
+            match holder {
+                ComponentHolder {
+                    component: _,
+                    component_instance: _,
+                    children,
+                } => match children.get() {
+                    Some(children) => {
+                        for child in children {
+                            match child {
+                                Child::Component { component } => {
+                                    if let Some(component) = find_component(component, find) {
+                                        return Some(component);
+                                    }
+                                }
+                                Child::Native { native: _ } => {}
+                            }
+                        }
+                        None
+                    }
+                    None => None,
+                },
+            }
+        }
+    }
+
+    fn visit(
+        holder: &ComponentHolder,
+        on_component: &impl Fn(&ComponentHolder),
+        on_native: &impl Fn(&Native),
+    ) {
+        on_component(holder);
+        match holder {
+            ComponentHolder {
+                component: _,
+                component_instance: _,
+                children,
+            } => match children.get() {
+                Some(children) => {
+                    for child in children {
+                        match child {
+                            Child::Component { component } => {
+                                visit(component, on_component, on_native);
+                            }
+                            Child::Native { native } => {
+                                on_native(native);
+                            }
+                        }
+                    }
+                }
+                None => {}
+            },
+        }
+    }
+
+    struct ComponentHolder {
+        component: OnceCell<Box<dyn Component>>,
+        component_instance: Arc<ComponentInstance>,
+        children: OnceCell<Vec<Child>>,
+    }
+
+    enum Child {
+        Component { component: ComponentHolder },
         Native { native: Native },
     }
 
-    fn next<'a>(component: Box<dyn Component + 'a>) -> ComponentHolder<'a> {
-        let type_id = component.as_ref().type_id();
-        let component_instance = ComponentInstance::new(0, type_id);
-
-        let mut holder = ComponentHolder {
-            component,
-            component_instance,
-            children: vec![],
-        };
+    fn next(component: OnceCell<Box<dyn Component>>) -> ComponentHolder {
+        static COMPONENT_ID: AtomicUsize = AtomicUsize::new(0);
+        let component_id = COMPONENT_ID.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let type_id = component.get().unwrap().as_ref().type_id();
+        let component_instance = Arc::new(ComponentInstance::new(component_id, type_id));
 
         {
-            let updated_signals = HashSet::new();
+            let updated_signals = Arc::new(HashSet::new());
             let context = Context::new(
                 ContextFor::Mount,
-                &holder.component_instance,
-                &updated_signals,
+                component_instance.clone(),
+                updated_signals,
             );
 
-            let done = holder.component.component(&context);
+            let done = component.get().unwrap().component(&context);
 
-            println!("instance: {:#?}", holder.component_instance);
+            println!("instance: {:#?}", component_instance);
             println!("done: {:#?}", done);
 
             match done {
-                ContextDone::Mount { child } => {
-                    holder.children.push(Child::Component {
-                        component: next(child),
-                    });
-                }
+                ContextDone::Mount { child } => ComponentHolder {
+                    component,
+                    component_instance,
+                    children: OnceCell::from(vec![Child::Component {
+                        component: next(child.into()),
+                    }]),
+                },
                 ContextDone::Event => unreachable!(),
                 ContextDone::Native { native } => {
                     println!("Native. Done!");
-                    holder.children.push(Child::Native { native });
+                    ComponentHolder {
+                        component,
+                        component_instance,
+                        children: OnceCell::from(vec![Child::Native { native }]),
+                    }
                 }
             }
         }
-
-        holder
-        // match done {
-        //     ContextDone::Mount { child } =>
-        //     // next(child)
-        //     {
-        //         todo!()
-        //     }
-        //     ContextDone::Event => unreachable!(),
-        //     ContextDone::Native { native } => {
-        //         println!("Native. Done!");
-        //         native
-        //     }
-        // }
     }
 }
 

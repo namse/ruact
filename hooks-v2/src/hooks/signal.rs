@@ -17,7 +17,7 @@ pub(crate) struct SignalId {
     pub signal_index: usize,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 pub struct Signal<'a, T> {
     id: SignalId,
     value: &'a T,

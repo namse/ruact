@@ -14,6 +14,7 @@ pub use signal::*;
 pub use state::*;
 use std::{
     any::{Any, TypeId},
+    cell::OnceCell,
     collections::HashSet,
     fmt::Debug,
     sync::{atomic::AtomicUsize, Arc},
@@ -22,7 +23,7 @@ use std::{
 #[derive(Debug)]
 pub(crate) enum ContextFor {
     Mount,
-    Event { event: Box<dyn Any> },
+    Event { event_callback: EventCallback },
     Consumed,
 }
 
@@ -32,25 +33,25 @@ impl Default for ContextFor {
     }
 }
 
-pub struct Context<'ctx> {
+pub struct Context {
     context_for: AtomicCell<ContextFor>,
-    instance: &'ctx ComponentInstance,
+    instance: Arc<ComponentInstance>,
     signal_index: AtomicUsize,
     state_index: AtomicUsize,
     effect_index: AtomicUsize,
     memo_index: AtomicUsize,
-    updated_signals: &'ctx HashSet<SignalId>,
+    updated_signals: Arc<HashSet<SignalId>>,
 }
 
 fn handle_on_event<Event>(context: &Context, on_event: impl FnOnce(Event)) {
     todo!()
 }
 
-impl<'ctx> Context<'ctx> {
+impl Context {
     pub(crate) fn new(
         context_for: ContextFor,
-        instance: &'ctx ComponentInstance,
-        updated_signals: &'ctx HashSet<SignalId>,
+        instance: Arc<ComponentInstance>,
+        updated_signals: Arc<HashSet<SignalId>>,
     ) -> Self {
         Self {
             context_for: AtomicCell::new(context_for),
@@ -64,38 +65,40 @@ impl<'ctx> Context<'ctx> {
     }
 
     pub fn state<State: Send + Sync + 'static>(
-        &'ctx self,
+        &self,
         init: impl FnOnce() -> State,
     ) -> (Signal<State>, SetState<State>) {
         handle_state(self, init)
     }
 
-    pub fn effect(&'ctx self, name: &'static str, effect: impl FnOnce() + 'ctx) {
+    pub fn effect(&self, name: &'static str, effect: impl FnOnce()) {
         let _ = name;
         handle_effect(self, effect);
     }
 
-    pub fn spec<'a, C: Component + 'ctx>(
-        &'ctx self,
-        render: impl 'a + FnOnce() -> C,
-    ) -> ContextDone {
+    pub fn spec<'a, 'b, C: Component + 'b>(&self, render: impl 'a + FnOnce() -> C) -> ContextDone {
         match self.context_for.take() {
             ContextFor::Mount => {
                 let child = render();
                 ContextDone::Mount {
-                    child: Box::new(child),
+                    child: unsafe {
+                        std::mem::transmute::<Box<dyn Component>, Box<dyn Component>>(Box::new(
+                            child,
+                        ))
+                        .into()
+                    },
                 }
             }
-            ContextFor::Event { event: _ } => {
+            ContextFor::Event { .. } => {
                 unreachable!()
             }
             ContextFor::Consumed => unreachable!(),
         }
     }
 
-    pub fn spec_with_event<'a, C: Component + 'ctx, Event: 'static>(
-        &'ctx self,
-        on_event: impl 'a + FnOnce(Event),
+    pub fn spec_with_event<'me, 'a, 'b, C: Component + 'b, Event: 'static + Send + Sync>(
+        &'me self,
+        on_event: impl 'a + FnOnce(&Event),
         render: impl 'a + FnOnce(EventContext<Event>) -> C,
     ) -> ContextDone {
         match self.context_for.take() {
@@ -103,18 +106,25 @@ impl<'ctx> Context<'ctx> {
                 let event_context = EventContext::new(self.instance.component_id);
                 let child = render(event_context);
                 ContextDone::Mount {
-                    child: Box::new(child),
+                    child: unsafe {
+                        std::mem::transmute::<Box<dyn Component>, Box<dyn Component>>(Box::new(
+                            child,
+                        ))
+                        .into()
+                    },
                 }
             }
-            ContextFor::Event { event } => {
-                on_event(*event.downcast().unwrap());
+            ContextFor::Event { event_callback } => {
+                assert_eq!(event_callback.component_id, self.instance.component_id);
+                let event = Arc::downcast::<Event>(event_callback.event).unwrap();
+                on_event(event.as_ref());
                 ContextDone::Event
             }
             ContextFor::Consumed => unreachable!(),
         }
     }
 
-    pub fn memo<T: 'static>(&'ctx self, memo: impl FnOnce() -> T) -> Signal<'ctx, T> {
+    pub fn memo<T: 'static>(&self, memo: impl FnOnce() -> T) -> Signal<'_, T> {
         handle_memo(self, memo)
     }
 
@@ -128,7 +138,7 @@ pub struct EventContext<Event: 'static> {
     _event: std::marker::PhantomData<Event>,
 }
 
-impl<Event: 'static> EventContext<Event> {
+impl<Event: 'static + Send + Sync> EventContext<Event> {
     fn new(component_id: usize) -> Self {
         Self {
             component_id,
@@ -143,8 +153,8 @@ impl<Event: 'static> EventContext<Event> {
     }
 }
 
-pub enum ContextDone<'a> {
-    Mount { child: Box<dyn Component + 'a> },
+pub enum ContextDone {
+    Mount { child: OnceCell<Box<dyn Component>> },
     Event,
     Native { native: Native },
 }
@@ -154,7 +164,7 @@ pub enum Native {
     Button { on_click: EventCallback },
 }
 
-impl Debug for ContextDone<'_> {
+impl Debug for ContextDone {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             ContextDone::Mount { .. } => write!(f, "ContextDone::Mount"),
@@ -164,8 +174,8 @@ impl Debug for ContextDone<'_> {
     }
 }
 
-pub trait Component: StaticTypeId {
-    fn component<'a>(&self, ctx: &'a Context) -> ContextDone<'a>;
+pub trait Component: StaticTypeId + Debug {
+    fn component<'a>(&'a self, ctx: &'a Context) -> ContextDone;
 }
 
 pub trait StaticTypeId {

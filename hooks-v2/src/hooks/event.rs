@@ -13,7 +13,7 @@ pub(crate) fn init_event_channel() {
 #[derive(Clone, Debug)]
 pub struct EventCallback {
     pub(crate) component_id: usize,
-    pub(crate) event: Arc<dyn Any>,
+    pub(crate) event: Arc<dyn Any + Send + Sync>,
 }
 unsafe impl Send for EventCallback {}
 unsafe impl Sync for EventCallback {}
