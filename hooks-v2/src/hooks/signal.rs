@@ -27,14 +27,14 @@ impl<'a, T> Signal<'a, T> {
     pub(crate) fn new(value: &'a T, id: SignalId) -> Self {
         Self { value, id }
     }
-    fn subscribe(&self) {
+    fn use_it(&self) {
         USED_SIGNAL_IDS.with(|ids| {
             let mut ids = ids.borrow_mut();
             ids.insert(self.id);
         });
     }
     pub fn on_effect(&'a self) -> bool {
-        self.subscribe();
+        self.use_it();
         true
     }
 }
@@ -43,7 +43,7 @@ impl<T> std::ops::Deref for Signal<'_, T> {
     type Target = T;
 
     fn deref(&self) -> &Self::Target {
-        self.subscribe();
+        self.use_it();
         self.value
     }
 }

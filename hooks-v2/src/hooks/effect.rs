@@ -1,14 +1,14 @@
 use super::*;
 
-pub(crate) fn handle_effect<'a>(context: &'a Context, effect: impl FnOnce()) {
+pub(crate) fn handle_effect<'a>(ctx: &'a Context, effect: impl FnOnce()) {
     unsafe {
-        let effect_used_signals_list = context
+        let effect_used_signals_list = ctx
             .instance
             .effect_used_signals_list
             .as_ptr()
             .as_mut()
             .unwrap();
-        let effect_index = context
+        let effect_index = ctx
             .effect_index
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
 
@@ -16,16 +16,13 @@ pub(crate) fn handle_effect<'a>(context: &'a Context, effect: impl FnOnce()) {
 
         let used_signal_updated = || {
             let used_signals = effect_used_signals_list.get(effect_index).unwrap();
-
-            used_signals
-                .into_iter()
-                .any(|signal_id| context.is_signal_updated(*signal_id))
+            ctx.is_used_signal_updated(used_signals)
         };
 
-        if is_first_run() || used_signal_updated() {
+        if is_first_run() || ctx.is_set_state_phase() && used_signal_updated() {
             effect();
             let used_signal_ids = take_used_signals();
-            effect_used_signals_list.insert(effect_index, used_signal_ids);
+            update_or_push(effect_used_signals_list, effect_index, used_signal_ids);
         }
     }
 }

@@ -1,13 +1,7 @@
 mod hooks;
 
 use hooks::*;
-use std::{
-    any::{Any, TypeId},
-    cell::{Cell, OnceCell},
-    collections::{HashMap, HashSet},
-    fmt::Debug,
-    sync::{atomic::AtomicUsize, Arc},
-};
+use std::{any::TypeId, fmt::Debug};
 
 #[derive(Debug)]
 struct MyComponent {}
@@ -22,11 +16,11 @@ impl Component for MyComponent {
         let fibo = ctx.memo(|| get_fibo(*count));
         let text = ctx.memo(|| format!("Count: {}, Fibo: {}", *count, *fibo));
 
-        ctx.spec_with_event(
+        ctx.render_with_event(
             |event| match event {
                 Event::OnClick => {
                     println!("Clicked");
-                    set_count.set(*count + 1)
+                    set_count.mutate(|count| *count += 1)
                 }
             },
             |ctx| Button {
@@ -37,8 +31,8 @@ impl Component for MyComponent {
     }
 }
 
-impl StaticTypeId for MyComponent {
-    fn type_id(&self) -> TypeId {
+impl StaticType for MyComponent {
+    fn static_type_id(&self) -> TypeId {
         TypeId::of::<MyComponent>()
     }
 }
@@ -63,15 +57,15 @@ mod without_event {
 
             let text = ctx.memo(|| format!("Count: {}, Fibo: {}", *count, *fibo));
 
-            ctx.spec(|| Button {
+            ctx.render(|| Button {
                 text,
                 on_click: self.on_something.clone(),
             })
         }
     }
 
-    impl StaticTypeId for MyComponent {
-        fn type_id(&self) -> TypeId {
+    impl StaticType for MyComponent {
+        fn static_type_id(&self) -> TypeId {
             TypeId::of::<MyComponent>()
         }
     }
@@ -93,8 +87,8 @@ struct Button<'a> {
     on_click: EventCallback,
 }
 
-impl StaticTypeId for Button<'_> {
-    fn type_id(&self) -> TypeId {
+impl StaticType for Button<'_> {
+    fn static_type_id(&self) -> TypeId {
         TypeId::of::<Button<'static>>()
     }
 }
@@ -111,11 +105,9 @@ impl Component for Button<'_> {
             println!("Button rendered");
         });
 
-        ContextDone::Native {
-            native: Native::Button {
-                on_click: self.on_click.clone(),
-            },
-        }
+        ctx.render(|| Native::Button {
+            on_click: self.on_click.clone(),
+        })
     }
 }
 
@@ -123,179 +115,3 @@ fn main() {
     let root = MyComponent {};
     start(root);
 }
-
-fn start<T: Component + 'static>(component: T) {
-    init_event_channel();
-    let holder: ComponentHolder = next(OnceCell::from(Box::new(component) as Box<dyn Component>));
-
-    println!("--- visit ---");
-    visit(
-        &holder,
-        &|component| {
-            println!(
-                "Component: {:#?}",
-                component.component.get().unwrap().as_ref()
-            );
-        },
-        &|native| {
-            println!("Native: {:#?}", native);
-
-            match native {
-                Native::Button { on_click } => {
-                    println!("Button clicked");
-                    on_click.call();
-                }
-            }
-        },
-    );
-    println!("--- visit done ---");
-
-    while let Ok(event_callback) = EVENT_RX.get().unwrap().recv() {
-        println!("Event Recv: {:#?}", event_callback);
-
-        let holder = find_component(&holder, &|holder| {
-            holder.component_instance.component_id == event_callback.component_id
-        });
-        if let Some(holder) = holder {
-            let updated_signals = Arc::new(HashSet::new());
-            let context = Context::new(
-                ContextFor::Event { event_callback },
-                holder.component_instance.clone(),
-                updated_signals,
-            );
-
-            let ContextDone::Event = holder.component.get().unwrap().component(&context) else {
-                unreachable!()
-            };
-        }
-    }
-
-    fn find_component<'a>(
-        holder: &'a ComponentHolder,
-        find: &impl Fn(&ComponentHolder) -> bool,
-    ) -> Option<&'a ComponentHolder> {
-        if find(holder) {
-            Some(holder)
-        } else {
-            match holder {
-                ComponentHolder {
-                    component: _,
-                    component_instance: _,
-                    children,
-                } => match children.get() {
-                    Some(children) => {
-                        for child in children {
-                            match child {
-                                Child::Component { component } => {
-                                    if let Some(component) = find_component(component, find) {
-                                        return Some(component);
-                                    }
-                                }
-                                Child::Native { native: _ } => {}
-                            }
-                        }
-                        None
-                    }
-                    None => None,
-                },
-            }
-        }
-    }
-
-    fn visit(
-        holder: &ComponentHolder,
-        on_component: &impl Fn(&ComponentHolder),
-        on_native: &impl Fn(&Native),
-    ) {
-        on_component(holder);
-        match holder {
-            ComponentHolder {
-                component: _,
-                component_instance: _,
-                children,
-            } => match children.get() {
-                Some(children) => {
-                    for child in children {
-                        match child {
-                            Child::Component { component } => {
-                                visit(component, on_component, on_native);
-                            }
-                            Child::Native { native } => {
-                                on_native(native);
-                            }
-                        }
-                    }
-                }
-                None => {}
-            },
-        }
-    }
-
-    struct ComponentHolder {
-        component: OnceCell<Box<dyn Component>>,
-        component_instance: Arc<ComponentInstance>,
-        children: OnceCell<Vec<Child>>,
-    }
-
-    enum Child {
-        Component { component: ComponentHolder },
-        Native { native: Native },
-    }
-
-    fn next(component: OnceCell<Box<dyn Component>>) -> ComponentHolder {
-        static COMPONENT_ID: AtomicUsize = AtomicUsize::new(0);
-        let component_id = COMPONENT_ID.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-        let type_id = component.get().unwrap().as_ref().type_id();
-        let component_instance = Arc::new(ComponentInstance::new(component_id, type_id));
-
-        {
-            let updated_signals = Arc::new(HashSet::new());
-            let context = Context::new(
-                ContextFor::Mount,
-                component_instance.clone(),
-                updated_signals,
-            );
-
-            let done = component.get().unwrap().component(&context);
-
-            println!("instance: {:#?}", component_instance);
-            println!("done: {:#?}", done);
-
-            match done {
-                ContextDone::Mount { child } => ComponentHolder {
-                    component,
-                    component_instance,
-                    children: OnceCell::from(vec![Child::Component {
-                        component: next(child.into()),
-                    }]),
-                },
-                ContextDone::Event => unreachable!(),
-                ContextDone::Native { native } => {
-                    println!("Native. Done!");
-                    ComponentHolder {
-                        component,
-                        component_instance,
-                        children: OnceCell::from(vec![Child::Native { native }]),
-                    }
-                }
-            }
-        }
-    }
-}
-
-/*
-- Start
-root부터 최말단까지 component instance를 만들어서 저장하고, native component를 시스템에 연결하는 것.
-시스템은 native component를 바탕으로 렌더링, I/O 등을 진행.
-
-- OnEvent
-시스템이 마우스 클릭과 같은 event를 받으면, 그 이벤트를 처리할 Component를 찾는다.
-Component가 없다면 로그를 찍고 넘어간다.
-Component가 있다면 그 컴포넌트에 Event를 건네줘서, 이벤트 처리를 할 수 있게 해준다.
-
-- OnSignal
-모종의 이유로 signal이 변경되었을 때 발동한다.
-Root에서부터 signal을 subscribe한 컴포넌트를 찾아나간다.
-컴포넌트 내 signal subscriber를 찾아서 재실행해준다.
-참고로, set_state는 곧장 실행되지 않는다. 다음 OnSignal tick때 진행한다.
-*/
